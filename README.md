@@ -2,7 +2,7 @@
 
 This project contains the Pytorch implementation of the following paper from Salesforce Research Asia: 
 
-**Title:** Learning Fast and Slow for Online Time Series Forecasting 
+**Title:** [Learning Fast and Slow for Online Time Series Forecasting](https://arxiv.org/abs/2202.11672)
 
 **Authors:** [Quang Pham](https://sites.google.com/view/quangpham93), [Chenghao Liu](https://sites.google.com/view/liuchenghao/home), [Doyen Sahoo](https://scholar.google.com.sg/citations?user=A61jJD4AAAAJ&hl=en), and [Steven Hoi](https://sites.google.com/view/stevenhoi/home)
 

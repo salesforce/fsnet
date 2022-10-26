@@ -38,7 +38,7 @@ chmod +x scripts/*.sh
 bash .scripts/run.sh
 ```
 
-### 3.  Arugments
+### 3.  Arguments
 
 **Method:** Our implementation supports the following training strategies:
 - ogd: OGD training

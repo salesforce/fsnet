@@ -1,13 +1,11 @@
 import math
-from typing import List, Optional
-
-import torch
-from torch import nn
-import torch.nn.functional as F
-import torch.fft as fft
+from typing import List
 
 import numpy as np
-from einops import rearrange, reduce, repeat
+import torch
+import torch.fft as fft
+from einops import rearrange, reduce
+from torch import nn
 
 from .fsnet_ import DilatedConvEncoder
 
@@ -17,23 +15,26 @@ def generate_continuous_mask(B, T, n=5, l=0.1):
     if isinstance(n, float):
         n = int(n * T)
     n = max(min(n, T // 2), 1)
-    
+
     if isinstance(l, float):
         l = int(l * T)
     l = max(l, 1)
-    
+
     for i in range(B):
         for _ in range(n):
-            t = np.random.randint(T-l+1)
-            res[i, t:t+l] = False
+            t = np.random.randint(T - l + 1)
+            res[i, t:t + l] = False
     return res
+
 
 def generate_binomial_mask(B, T, p=0.5):
     return torch.from_numpy(np.random.binomial(1, p, size=(B, T))).to(torch.bool)
 
+
 class TSEncoder(nn.Module):
-    def __init__(self, input_dims, output_dims, hidden_dims=64, depth=10, mask_mode='binomial', gamma=0.9):
+    def __init__(self, input_dims, output_dims, hidden_dims=64, depth=10, mask_mode='binomial', gamma=0.9, device=None):
         super().__init__()
+        self.device = device if device else torch.device('cuda:0')
         self.input_dims = input_dims
         self.output_dims = output_dims
         self.hidden_dims = hidden_dims
@@ -42,13 +43,14 @@ class TSEncoder(nn.Module):
         self.feature_extractor = DilatedConvEncoder(
             hidden_dims,
             [hidden_dims] * depth + [output_dims],
-            kernel_size=3, gamma=gamma
+            kernel_size=3, gamma=gamma,
+            device=self.device
         )
         self.repr_dropout = nn.Dropout(p=0.1)
 
         # [64] * 10 + [320] = [64, 64, 64, 64, 64, 64, 64, 64, 64 ,64, 320] = 11 items
         # for i in range(len(...)) -> 0, 1, ..., 10
-    
+
     def ctrl_params(self):
         return self.feature_extractor.ctrl_params()
 
@@ -56,14 +58,14 @@ class TSEncoder(nn.Module):
         nan_mask = ~x.isnan().any(axis=-1)
         x[~nan_mask] = 0
         x = self.input_fc(x)  # B x T x Ch
-        
+
         # generate & apply mask
         if mask is None:
             if self.training:
                 mask = self.mask_mode
             else:
                 mask = 'all_true'
-        
+
         if mask == 'binomial':
             mask = generate_binomial_mask(x.size(0), x.size(1)).to(x.device)
         elif mask == 'continuous':
@@ -75,15 +77,15 @@ class TSEncoder(nn.Module):
         elif mask == 'mask_last':
             mask = x.new_full((x.size(0), x.size(1)), True, dtype=torch.bool)
             mask[:, -1] = False
-        
+
         mask &= nan_mask
         x[~mask] = 0
-        
+
         # conv encoder
         x = x.transpose(1, 2)  # B x Ch x T
         x = self.repr_dropout(self.feature_extractor(x))  # B x Co x T
         x = x.transpose(1, 2)  # B x T x Co
-        
+
         return x
 
 
@@ -103,15 +105,16 @@ class BandedFourierLayer(nn.Module):
         self.band = band  # zero indexed
         self.num_bands = num_bands
 
-        self.num_freqs = self.total_freqs // self.num_bands + (self.total_freqs % self.num_bands if self.band == self.num_bands - 1 else 0)
+        self.num_freqs = self.total_freqs // self.num_bands + (
+            self.total_freqs % self.num_bands if self.band == self.num_bands - 1 else 0)
 
         self.start = self.band * (self.total_freqs // self.num_bands)
         self.end = self.start + self.num_freqs
 
-
         # case: from other frequencies
         if self.freq_mixing:
-            self.weight = nn.Parameter(torch.empty((self.num_freqs, in_channels, self.total_freqs, out_channels), dtype=torch.cfloat))
+            self.weight = nn.Parameter(
+                torch.empty((self.num_freqs, in_channels, self.total_freqs, out_channels), dtype=torch.cfloat))
         else:
             self.weight = nn.Parameter(torch.empty((self.num_freqs, in_channels, out_channels), dtype=torch.cfloat))
         if bias:
@@ -152,7 +155,7 @@ class GlobalLocalMultiscaleTSEncoder(nn.Module):
                  num_bands: int,
                  freq_mixing: bool,
                  length: int,
-                 mode = 0,
+                 mode=0,
                  hidden_dims=64, depth=10, mask_mode='binomial', gamma=0.9):
         super().__init__()
 
@@ -166,17 +169,17 @@ class GlobalLocalMultiscaleTSEncoder(nn.Module):
         self.feature_extractor = DilatedConvEncoder(
             hidden_dims,
             [hidden_dims] * depth + [output_dims],
-            kernel_size=3, gamma = gamma
+            kernel_size=3, gamma=gamma
         )
 
         self.kernels = kernels
         self.num_bands = num_bands
 
         self.convs = nn.ModuleList(
-            [nn.Conv1d(output_dims, output_dims//2, k, padding=k-1) for k in kernels]
+            [nn.Conv1d(output_dims, output_dims // 2, k, padding=k - 1) for k in kernels]
         )
         self.fouriers = nn.ModuleList(
-            [BandedFourierLayer(output_dims, output_dims//2, b, num_bands,
+            [BandedFourierLayer(output_dims, output_dims // 2, b, num_bands,
                                 freq_mixing=freq_mixing, length=length) for b in range(num_bands)]
         )
 

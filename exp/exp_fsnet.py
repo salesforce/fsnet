@@ -1,28 +1,23 @@
-from data.data_loader import Dataset_ETT_hour, Dataset_ETT_minute, Dataset_Custom, Dataset_Pred
-from exp.exp_basic import Exp_Basic
-from models.ts2vec.fsnet import TSEncoder, GlobalLocalMultiscaleTSEncoder
-from models.ts2vec.losses import hierarchical_contrastive_loss
-from tqdm import tqdm
-from utils.tools import EarlyStopping, adjust_learning_rate
-from utils.metrics import metric, cumavg
-import pdb
-import numpy as np
-from einops import rearrange
-from collections import OrderedDict, defaultdict
-import time
-import torch
-import torch.nn as nn
-from torch import optim
-from torch.utils.data import DataLoader
-
-from sklearn.linear_model import Ridge
-from sklearn.model_selection import GridSearchCV, train_test_split
-
 import os
 import time
+import warnings
+from collections import defaultdict
 from pathlib import Path
 
-import warnings
+import numpy as np
+import torch
+import torch.nn as nn
+from einops import rearrange
+from torch import optim
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from data.data_loader import Dataset_ETT_hour, Dataset_ETT_minute, Dataset_Custom, Dataset_Pred
+from exp.exp_basic import Exp_Basic
+from models.ts2vec.fsnet import TSEncoder
+from utils.metrics import metric, cumavg
+from utils.tools import EarlyStopping, adjust_learning_rate
+
 warnings.filterwarnings('ignore')
 
 
@@ -35,30 +30,34 @@ class TS2VecEncoderWrapper(nn.Module):
     def forward(self, input):
         return self.encoder(input, mask=self.mask)[:, -1]
 
+
 class net(nn.Module):
     def __init__(self, args, device):
         super().__init__()
         self.device = device
         encoder = TSEncoder(input_dims=args.enc_in + 7,
-                             output_dims=320,  # standard ts2vec backbone value
-                             hidden_dims=64, # standard ts2vec backbone value
-                             depth=10) 
+                            output_dims=320,  # standard ts2vec backbone value
+                            hidden_dims=64,  # standard ts2vec backbone value
+                            depth=10,
+                            device=self.device)
         self.encoder = TS2VecEncoderWrapper(encoder, mask='all_true').to(self.device)
         self.dim = args.c_out * args.pred_len
-        
-        #self.regressor = nn.Sequential(nn.Linear(320, 320), nn.ReLU(), nn.Linear(320, self.dim)).to(self.device)
+
+        # self.regressor = nn.Sequential(nn.Linear(320, 320), nn.ReLU(), nn.Linear(320, self.dim)).to(self.device)
         self.regressor = nn.Linear(320, self.dim).to(self.device)
-        
+
     def forward(self, x):
         rep = self.encoder(x)
         y = self.regressor(rep)
         return y
+
     def store_grad(self):
-        for name, layer in self.encoder.named_modules():    
+        for name, layer in self.encoder.named_modules():
             if 'PadConv' in type(layer).__name__:
-                #print('{} - {}'.format(name, type(layer).__name__))
+                # print('{} - {}'.format(name, type(layer).__name__))
                 layer.store_grad()
-        
+
+
 class Exp_TS2VecSupervised(Exp_Basic):
     def __init__(self, args):
         self.args = args
@@ -67,12 +66,12 @@ class Exp_TS2VecSupervised(Exp_Basic):
         assert self.online in ['none', 'full', 'regressor']
         self.n_inner = args.n_inner
         self.opt_str = args.opt
-        self.model = net(args, device = self.device)
-         
+        self.model = net(args, device=self.device)
+
         if args.finetune:
             inp_var = 'univar' if args.features == 'S' else 'multivar'
             model_dir = str([path for path in Path(f'/export/home/TS_SSL/ts2vec/training/ts2vec/{args.data}/')
-                .rglob(f'forecast_{inp_var}_*')][args.finetune_model_seed])
+                            .rglob(f'forecast_{inp_var}_*')][args.finetune_model_seed])
             state_dict = torch.load(os.path.join(model_dir, 'model.pkl'))
             for name in list(state_dict.keys()):
                 if name != 'n_averaged':
@@ -97,7 +96,7 @@ class Exp_TS2VecSupervised(Exp_Basic):
         Data = data_dict[self.args.data]
         timeenc = 2
 
-        if flag  == 'test':
+        if flag == 'test':
             shuffle_flag = False;
             drop_last = False;
             batch_size = args.test_bsz;
@@ -183,7 +182,7 @@ class Exp_TS2VecSupervised(Exp_Basic):
                     train_data, batch_x, batch_y, batch_x_mark, batch_y_mark)
                 loss = criterion(pred, true)
                 train_loss.append(loss.item())
-                
+
                 if (i + 1) % 100 == 0:
                     print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
                     speed = (time.time() - time_now) / iter_count
@@ -203,7 +202,7 @@ class Exp_TS2VecSupervised(Exp_Basic):
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             train_loss = np.average(train_loss)
             vali_loss = self.vali(vali_data, vali_loader, criterion)
-            #test_loss = self.vali(test_data, test_loader, criterion)
+            # test_loss = self.vali(test_data, test_loader, criterion)
             test_loss = 0.
 
             print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
@@ -223,7 +222,7 @@ class Exp_TS2VecSupervised(Exp_Basic):
     def vali(self, vali_data, vali_loader, criterion):
         self.model.eval()
         total_loss = []
-        for i, (batch_x,batch_y,batch_x_mark,batch_y_mark) in enumerate(vali_loader):
+        for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(vali_loader):
             pred, true = self._process_one_batch(
                 vali_data, batch_x, batch_y, batch_x_mark, batch_y_mark, mode='vali')
             loss = criterion(pred.detach().cpu(), true.detach().cpu())
@@ -238,15 +237,15 @@ class Exp_TS2VecSupervised(Exp_Basic):
         self.model.eval()
         if self.online == 'regressor':
             for p in self.model.encoder.parameters():
-                p.requires_grad = False 
+                p.requires_grad = False
         elif self.online == 'none':
             for p in self.model.parameters():
                 p.requires_grad = False
-        
+
         preds = []
         trues = []
         start = time.time()
-        maes,mses,rmses,mapes,mspes = [],[],[],[],[]
+        maes, mses, rmses, mapes, mspes = [], [], [], [], []
         for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(tqdm(test_loader)):
             pred, true = self._process_one_batch(
                 test_data, batch_x, batch_y, batch_x_mark, batch_y_mark, mode='test')
@@ -262,18 +261,18 @@ class Exp_TS2VecSupervised(Exp_Basic):
         preds = torch.cat(preds, dim=0).numpy()
         trues = torch.cat(trues, dim=0).numpy()
         print('test shape:', preds.shape, trues.shape)
-        
+
         MAE, MSE, RMSE, MAPE, MSPE = cumavg(maes), cumavg(mses), cumavg(rmses), cumavg(mapes), cumavg(mspes)
         mae, mse, rmse, mape, mspe = MAE[-1], MSE[-1], RMSE[-1], MAPE[-1], MSPE[-1]
 
         end = time.time()
         exp_time = end - start
-        #mae, mse, rmse, mape, mspe = metric(preds, trues)
+        # mae, mse, rmse, mape, mspe = metric(preds, trues)
         print('mse:{}, mae:{}, time:{}'.format(mse, mae, exp_time))
         return [mae, mse, rmse, mape, mspe, exp_time], MAE, MSE, preds, trues
 
     def _process_one_batch(self, dataset_object, batch_x, batch_y, batch_x_mark, batch_y_mark, mode='train'):
-        if mode =='test' and self.online != 'none':
+        if mode == 'test' and self.online != 'none':
             return self._ol_one_batch(dataset_object, batch_x, batch_y, batch_x_mark, batch_y_mark)
 
         x = torch.cat([batch_x.float(), batch_x_mark.float()], dim=-1).to(self.device)
@@ -283,14 +282,14 @@ class Exp_TS2VecSupervised(Exp_Basic):
                 outputs = self.model(x)
         else:
             outputs = self.model(x)
-        f_dim = -1 if self.args.features=='MS' else 0
-        batch_y = batch_y[:,-self.args.pred_len:,f_dim:].to(self.device)
+        f_dim = -1 if self.args.features == 'MS' else 0
+        batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
         return outputs, rearrange(batch_y, 'b t d -> b (t d)')
-    
-    def _ol_one_batch(self,dataset_object, batch_x, batch_y, batch_x_mark, batch_y_mark):
+
+    def _ol_one_batch(self, dataset_object, batch_x, batch_y, batch_x_mark, batch_y_mark):
         true = rearrange(batch_y, 'b t d -> b (t d)').float().to(self.device)
         criterion = self._select_criterion()
-        
+
         x = torch.cat([batch_x.float(), batch_x_mark.float()], dim=-1).to(self.device)
         batch_y = batch_y.float()
         for _ in range(self.n_inner):
@@ -302,11 +301,10 @@ class Exp_TS2VecSupervised(Exp_Basic):
 
             loss = criterion(outputs, true)
             loss.backward()
-            self.opt.step()       
+            self.opt.step()
             self.model.store_grad()
             self.opt.zero_grad()
 
-        f_dim = -1 if self.args.features=='MS' else 0
-        batch_y = batch_y[:,-self.args.pred_len:,f_dim:].to(self.device)
+        f_dim = -1 if self.args.features == 'MS' else 0
+        batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
         return outputs, rearrange(batch_y, 'b t d -> b (t d)')
-
